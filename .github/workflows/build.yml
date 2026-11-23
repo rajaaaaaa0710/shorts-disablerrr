@@ -1,0 +1,199 @@
+name: Build NoShorts
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/me/noshorts app/src/main/res/xml app/src/main/res/values
+          echo "android.useAndroidX=true" > gradle.properties
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "NoShorts"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.me.noshorts"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.me.noshorts"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="NoShorts"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".BlockerService"
+                      android:exported="false"
+                      android:label="NoShorts"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="200"
+              android:packageNames="com.instagram.android,com.google.android.youtube,com.zhiliaoapp.musically,com.ss.android.ugc.trill,com.facebook.katana,com.snapchat.android"
+              android:description="@string/service_desc" />
+          EOF
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="service_desc">Detects Reels, Shorts and TikTok screens and sends you back. Reads nothing else and sends no data anywhere.</string>
+          </resources>
+          EOF
+          cat > app/src/main/java/com/me/noshorts/MainActivity.kt <<'EOF'
+          package com.me.noshorts
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(64, 160, 64, 64)
+                  }
+                  layout.addView(TextView(this).apply {
+                      textSize = 18f
+                      text = "NoShorts blocks Instagram Reels, YouTube Shorts, Facebook Reels " +
+                          "and TikTok.\n\n1. Tap the button below.\n2. Open Installed apps / Downloaded apps.\n" +
+                          "3. Turn on NoShorts.\n\nIf Android says the setting is restricted: " +
+                          "App info > ⋮ > Allow restricted settings, then try again."
+                  })
+                  layout.addView(Button(this).apply {
+                      text = "Open Accessibility settings"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  })
+                  setContentView(layout)
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/me/noshorts/BlockerService.kt <<'EOF'
+          package com.me.noshorts
+
+          import android.accessibilityservice.AccessibilityService
+          import android.util.Log
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class BlockerService : AccessibilityService() {
+
+              // Apps that are entirely short-video feeds: block on open.
+              private val blockedApps = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+
+              // View-id fragments that mean "a Reels/Shorts player is on screen".
+              // IDs change between app versions: set DEBUG = true and check Logcat (tag NoShorts) to adjust.
+              private val idFragments = mapOf(
+                  "com.google.android.youtube" to listOf("reel_player_page_container", "reel_recycler", "shorts_"),
+                  "com.instagram.android" to listOf("clips_viewer", "clips_swipe_refresh", "reel_viewer"),
+                  "com.facebook.katana" to listOf("reels_viewer", "reel_player"),
+                  "com.snapchat.android" to listOf("spotlight")
+              )
+
+              private var lastBlock = 0L
+              private val DEBUG = false
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent) {
+                  val pkg = event.packageName?.toString() ?: return
+                  val now = System.currentTimeMillis()
+                  if (now - lastBlock < 800) return
+
+                  if (pkg in blockedApps) {
+                      lastBlock = now
+                      performGlobalAction(GLOBAL_ACTION_HOME)
+                      return
+                  }
+
+                  val fragments = idFragments[pkg] ?: return
+                  val root = rootInActiveWindow ?: return
+                  if (containsShortsUi(root, fragments, 0)) {
+                      lastBlock = now
+                      performGlobalAction(GLOBAL_ACTION_BACK)
+                  }
+              }
+
+              private fun containsShortsUi(node: AccessibilityNodeInfo?, frags: List<String>, depth: Int): Boolean {
+                  if (node == null || depth > 25) return false
+                  val id = node.viewIdResourceName
+                  if (id != null) {
+                      if (DEBUG) Log.d("NoShorts", "id=$id visible=${node.isVisibleToUser}")
+                      if (node.isVisibleToUser && frags.any { id.contains(it, ignoreCase = true) }) return true
+                  }
+                  for (i in 0 until node.childCount) {
+                      if (containsShortsUi(node.getChild(i), frags, depth + 1)) return true
+                  }
+                  return false
+              }
+
+              override fun onInterrupt() {}
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk NoShorts.apk
+          gh release create "v${{ github.run_number }}" NoShorts.apk --repo "${{ github.repository }}" --title "NoShorts build ${{ github.run_number }}" --notes "Download NoShorts.apk below"
